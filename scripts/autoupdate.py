@@ -9,11 +9,13 @@ import yaml
 import sys
 import os
 import dulwich.porcelain
+import functools
 import re
-import semver
+import itertools
 
 
-BASEVERSION = r'^[vV]?((\.?[0-9]+)+)[a-z]?(-?[a-z]+[0-9]*)?$'
+BASEVERSION = r'^[vV]?([0-9]+(\.[0-9]+)*)[a-z]?(-?[a-z.]+[0-9]*)?$'
+VERSION_COMPONENTS = re.compile(r'(\d+ | [a-z]+ | \.)', re.VERBOSE)
 
 def get_latest_versioned_tag_from_refs(refs):
     """
@@ -44,19 +46,44 @@ def get_latest_versioned_tag_from_refs(refs):
     # numbers separated by periods)
     tags=list(filter(lambda x: re.match(BASEVERSION, x), tags))
     # Sort list from lowest to highest version (last item is highest version)
-    # Converts each version number into a list of ints and compares the lists
-    # for ordered integers.  The end result is the same list of tag names but
-    # sorted according to version number.
-    def key(tag):
-        match = re.match(BASEVERSION, tag)
-        version = list(map(int, match.group(1).split('.'))) # List of ints, so they can be properly compared
-        suffix = match.groups()[-1] or '\xff' * 100 # Make sure no suffix is considered "greater" than any other suffix
-        return (version, suffix)
-    tags.sort(key=key)
+
+    # This is taken from distutils.version.LooseVersion - we need access to the component list, so we have to reimplement
+    def parse_version(vstring):
+        vstring = vstring.lstrip('vV')
+        components = [x for x in VERSION_COMPONENTS.split(vstring) if x and x != '.']
+        for i, obj in enumerate(components):
+            try:
+                components[i] = int(obj)
+            except ValueError:
+                pass
+        return components
+
+    def cmp(tag1, tag2):
+        components1 = parse_version(tag1)
+        components2 = parse_version(tag2)
+        # can't compare mixed lists of int & str directly, so we iterate
+        for (x, y) in itertools.zip_longest(components1, components2):
+            if x == y:
+                continue
+            # longer version > shorter version
+            if x is None:
+                return -1
+            if y is None:
+                return 1
+            if type(x) != type(y):
+                # in case of mixed types, int > str
+                return (type(x) == int) - (type(y) == int)
+            else:
+                return (x > y) - (x < y)  # old school cmp
+        return 0  # equality
+
+    tags.sort(key=functools.cmp_to_key(cmp))
     # return the highest version which is the last item in list
     return tags[-1]
 
+
 def ls_remote(url):
+    print(url)
     byte_dict = dulwich.porcelain.ls_remote(url)
     string_dict = {}
     for k, v in byte_dict.items():
@@ -85,6 +112,9 @@ def update(file):
     print("Running autoupdate for " + file)
     with open(file, "r") as f:
         manifest = yaml.load(f, Loader=yaml.FullLoader)
+
+    if not "autoupdate" in manifest:
+        return
 
     au = manifest["autoupdate"]
     au_type = au["type"]
